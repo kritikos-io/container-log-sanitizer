@@ -76,53 +76,46 @@ Publishing is manual, to `containers.kritikos.io/system/container-log-sanitizer`
 
 `GitVersion.yml` uses `TrunkBased/preview1`, optional `v`/`V` tag prefixes, and stable patch-incrementing release branches. Its path filter includes root Go files, `redactor/`, dependency manifests, the Dockerfile and Docker build ignore rules, the plugin manifest, the installer, and GitVersion configuration. Documentation-only and Alloy-example-only changes are excluded from version-source selection. Existing Git history and version tags determine the starting version; no release tag is created automatically. `SemVer` is used for the plugin tag because `FullSemVer` may contain `+` build metadata, which is invalid in Docker tags.
 
-Use a clean, full clone owned by the publishing user, checked out on `main` or the intended release branch. Run this block from the repository in a root Bash terminal on a Linux Docker host with Go 1.24 or newer, a C compiler, Git, and `jq`. The Docker daemon must be local to that host, and installation targets must match the built binary's architecture. This procedure rebuilds the ignored binary instead of trusting an earlier `dist/` artifact. GitVersion runs in a pinned container; the publishing host does not need .NET.
+Use a clean, full clone owned by the publishing user, checked out on `main` or the intended release branch. Run the script from a root Bash terminal on a Linux Docker host with Go 1.24 or newer, a C compiler, Git, and `jq`. The Docker daemon must be local to that host, and installation targets must match the built binary's architecture. The script rebuilds the ignored binary instead of trusting an earlier `dist/` artifact. GitVersion runs in a pinned container; the publishing host does not need .NET.
 
 ```sh
-set -euo pipefail
-git fetch --tags origin
-test "$(git rev-parse --is-shallow-repository)" = false
-test -z "$(git status --porcelain)"
-docker login containers.kritikos.io
-version=$(docker run --rm --network none --log-driver none \
-  --volume "$PWD:/repo" \
-  gittools/gitversion:6.8.2-alpine.3.23-10.0 \
-  /repo -config /repo/GitVersion.yml -nofetch -nocache -showvariable SemVer)
-test -n "$version"
-plugin="containers.kritikos.io/system/container-log-sanitizer:$version"
-data_root="/var/lib/container-log-sanitizer-publish-$version"
-printf 'Publishing %s from %s\n' "$plugin" "$(git rev-parse HEAD)"
-go test -race ./... -count=1 -timeout=120s
-CGO_ENABLED=0 GOOS=linux go build -trimpath -o dist/container-log-sanitizer .
-bash build-plugin.sh "$plugin" "$data_root"
-docker pull busybox:1.37.0
-bash canary.sh "$plugin" busybox:1.37.0 local
-bash canary.sh "$plugin" busybox:1.37.0 json-file
-docker plugin push "$plugin"
+bash publish-plugin.sh
 ```
 
-If the clone is shallow, run `git fetch --unshallow origin` before this block. Review Docker's push output for the published digest. Use version tags as immutable releases; no `latest` tag is published. The installer refuses an existing local plugin name. If only the push fails after both canaries passed, retry `docker plugin push "$plugin"` instead of rebuilding or replacing that plugin. Publishing leaves the isolated local plugin and its canary storage available for inspection; no application containers are changed. Registry compatibility and authentication are only verified by an actual push.
+The script checks prerequisites, fetches tags, prompts for registry login, calculates the version, builds, runs both backend canaries, and pushes only after they pass. Failures print a specific preflight error or the failing stage and exit status. Run it with `bash`, not `source`, so its strict shell options cannot alter your interactive terminal. Registry prompts retain terminal input and do not require credentials in a file or command argument.
+
+If you pasted an earlier procedure containing `set -euo pipefail` directly into an interactive WSL terminal, a failing command could terminate that shell. Reopen WSL and clear those options before running the script:
+
+```sh
+set +e +u
+set +o pipefail
+bash publish-plugin.sh
+```
+
+If the clone is shallow, run `git fetch --unshallow origin` before retrying. Review Docker's push output for the published digest. Use version tags as immutable releases; no `latest` tag is published. The installer refuses an existing local plugin name. If only the push fails after both canaries passed, retry `docker plugin push` with the full reference printed by the script instead of rebuilding or replacing that plugin. Publishing leaves the isolated local plugin and its canary storage available for inspection; no application containers are changed. Registry compatibility and authentication are only verified by an actual push.
 
 ### Install A Published Version
 
 On another Linux Docker host, authenticate using an account with pull access and enter the exact version that was published. Use a new dedicated data directory and review the permissions requested by Docker:
 
 ```sh
-set -euo pipefail
-docker login containers.kritikos.io
-read -r -p 'Published version: ' version
-test -n "$version"
-plugin="containers.kritikos.io/system/container-log-sanitizer:$version"
-data_root="/var/lib/container-log-sanitizer-$version"
-test ! -e "$data_root"
-install -d -m 0700 "$data_root"
-touch "$data_root/.sanitizer-store"
-docker plugin install --disable "$plugin" "logdata.source=$data_root"
-docker plugin enable --timeout 0 "$plugin"
-docker plugin inspect "$plugin" --format '{{.Name}} enabled={{.Enabled}}'
+(
+  set -euo pipefail
+  docker login containers.kritikos.io
+  read -r -p 'Published version: ' version
+  test -n "$version"
+  plugin="containers.kritikos.io/system/container-log-sanitizer:$version"
+  data_root="/var/lib/container-log-sanitizer-$version"
+  test ! -e "$data_root"
+  install -d -m 0700 "$data_root"
+  touch "$data_root/.sanitizer-store"
+  docker plugin install --disable "$plugin" "logdata.source=$data_root"
+  docker plugin enable --timeout 0 "$plugin"
+  docker plugin inspect "$plugin" --format '{{.Name}} enabled={{.Enabled}}'
+)
 ```
 
-Install disabled and then enable explicitly with `--timeout 0` to retain long-running follow streams. Set `SANITIZER_PLUGIN` to the full versioned reference for the one-service pilot below. Installing or publishing the plugin does not change any container's logging driver. Do not share a data directory between concurrently enabled plugin versions.
+The parentheses keep strict shell options inside the installation subshell. Install disabled and then enable explicitly with `--timeout 0` to retain long-running follow streams. Set `SANITIZER_PLUGIN` to the full versioned reference for the one-service pilot below. Installing or publishing the plugin does not change any container's logging driver. Do not share a data directory between concurrently enabled plugin versions.
 
 ## One-Service Pilot And Rollback
 

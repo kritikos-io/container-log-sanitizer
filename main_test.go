@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -58,6 +59,26 @@ func TestPluginInstallerKeepsPortableConfig(test *testing.T) {
 			test.Fatalf("installer must run %q in order", command)
 		}
 		remaining = remaining[position+len(command):]
+	}
+}
+
+func TestPublisherFailureKeepsParentShellAlive(test *testing.T) {
+	command := exec.Command("bash", "-c", `
+set +e +u
+set +o pipefail
+bash publish-plugin.sh unexpected-argument
+status=$?
+printf 'parent shell alive; child exit=%s\n' "$status"
+test "$status" -eq 1
+`)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		test.Fatalf("parent shell exited unexpectedly: %v\n%s", err, output)
+	}
+	for _, expected := range []string{"Usage: bash publish-plugin.sh", "parent shell alive; child exit=1"} {
+		if !strings.Contains(string(output), expected) {
+			test.Fatalf("missing %q in shell output: %s", expected, output)
+		}
 	}
 }
 
