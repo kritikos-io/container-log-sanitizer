@@ -12,6 +12,20 @@ docker logs / compose logs / collectors <- ReadLogs endpoint <- stored records
 
 The filter runs before persistence. It drops complete records only when they contain at least one NUL and all other bytes are ASCII whitespace. It does not strip ANSI codes, rewrite trace/span IDs, drop normal blank lines, or alter mixed text/NUL records. No application changes are needed. Beyla enrichment and its required capabilities can stay enabled.
 
+## Plugin Metadata
+
+The managed plugin carries a human-readable `description` and a `documentation` URL pointing to this repository's README. Both publishing and local installation include the README and Apache-2.0 license under `/usr/share/doc/container-log-sanitizer/` inside the plugin filesystem.
+
+Inspect the metadata of a locally created or installed version with:
+
+```sh
+read -r -p 'Plugin version: ' version
+docker plugin inspect "containers.kritikos.io/system/container-log-sanitizer:$version" \
+  --format '{{.Config.Description}}{{println}}{{.Config.Documentation}}'
+```
+
+This is Docker managed-plugin metadata, not ordinary container-image labels. Bundling the files does not automatically publish a Docker Hub-style README page in Zot. The native plugin configuration does not expose OCI image-label fields; the documentation URL is the supported link to the full project documentation. Existing published versions retain their original metadata until a new artifact is built and published.
+
 ## Select A Backend
 
 Set `--log-opt backend=local` or `--log-opt backend=json-file` on containers using this plugin. Omitting the option selects `local`. Both backends share the same pre-storage filter, optional redaction, and Docker `ReadLogs` API; unsupported backend names are rejected.
@@ -76,13 +90,13 @@ Publishing is manual, to `containers.kritikos.io/system/container-log-sanitizer`
 
 `GitVersion.yml` uses `TrunkBased/preview1`, optional `v`/`V` tag prefixes, and stable patch-incrementing release branches. Its path filter includes root Go files, `redactor/`, dependency manifests, the Dockerfile and Docker build ignore rules, the plugin manifest, the installer and publisher, and GitVersion configuration. Documentation-only and Alloy-example-only changes are excluded from version-source selection. Existing Git history and version tags determine the starting version; no release tag is created automatically. `SemVer` is used for the plugin tag because `FullSemVer` may contain `+` build metadata, which is invalid in Docker tags.
 
-Use a clean, full clone owned by your normal user, checked out on `main` or the intended release branch. Run the script in your normal WSL or Linux Bash terminal with Go 1.24 or newer, a C compiler, Git, and access to a Linux Docker daemon with managed-plugin support. Root in WSL and `sudo` are not required for publishing; Docker manages the plugin's storage through its API. Verify Docker access with `docker version` as that same user. The Docker daemon must be able to bind-mount the checkout for GitVersion, and installation targets must match the built binary's architecture. The script rebuilds the ignored binary instead of trusting an earlier `dist/` artifact. GitVersion runs in a pinned container; the publishing workstation does not need .NET or `jq`.
+Run the script in your normal WSL or Linux Bash terminal with Go 1.24 or newer, a C compiler, your global GitVersion .NET tool available as `dotnet-gitversion`, and access to a Linux Docker daemon with managed-plugin support. Root in WSL and `sudo` are not required for publishing; Docker manages the plugin's storage through its API. Installation targets must match the built binary's architecture. The script rebuilds the ignored binary from your current files, including uncommitted edits, instead of trusting an earlier `dist/` artifact. GitVersion runs locally with `-nofetch -nocache`; no GitVersion container or checkout bind mount is used.
 
 ```sh
 bash publish-plugin.sh
 ```
 
-The script checks prerequisites, fetches tags, prompts for registry login, calculates the version, runs the Go race tests, builds, creates a disabled managed plugin, and pushes it. It does not enable the plugin, create host log directories, or run host canaries. Temporary packaging files are removed on success or failure. Failures print a specific preflight error or the failing stage and exit status. Run it with `bash`, not `source`, so its strict shell options cannot alter your interactive terminal. Registry prompts retain terminal input and do not require credentials in a file or command argument.
+The script calculates the version from local Git history, runs the Go race tests, builds and packages the binary, prompts for registry login, creates a disabled managed plugin, and pushes it. It does not require a clean working tree, fetch tags, select branches, create commits, enable the plugin, create host log directories, or run host canaries. Temporary packaging files are removed on success or failure. Failures print the failing stage and exit status. Run it with `bash`, not `source`, so its strict shell options cannot alter your interactive terminal. Registry prompts retain terminal input and do not require credentials in a file or command argument.
 
 If you pasted an earlier procedure containing `set -euo pipefail` directly into an interactive WSL terminal, a failing command could terminate that shell. Reopen WSL and clear those options before running the script:
 
@@ -92,7 +106,7 @@ set +o pipefail
 bash publish-plugin.sh
 ```
 
-If the clone is shallow, run `git fetch --unshallow origin` before retrying. Review Docker's push output for the published digest. Use version tags as immutable releases; no `latest` tag is published. The publisher refuses an existing local plugin name. If only the push fails, retry `docker plugin push` with the full reference printed by the script instead of rebuilding or replacing that plugin. Publishing leaves the local plugin disabled; no application containers are changed. Registry compatibility and authentication are only verified by an actual push. The integration workflow still runs live Docker canaries, and both backends must also pass the canaries on the deployment host before a service uses the plugin.
+Review Docker's push output for the published digest. No `latest` tag is published, and existing local plugins are not automatically removed or replaced. If only the push fails, retry `docker plugin push` with the full reference printed by the script instead of rebuilding or replacing that plugin. Publishing leaves the local plugin disabled; no application containers are changed. Registry compatibility and authentication are only verified by an actual push. The integration workflow still runs live Docker canaries, and both backends must also pass the canaries on the deployment host before a service uses the plugin.
 
 ### Install A Published Version
 

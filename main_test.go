@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/plugins/logdriver"
 	"github.com/docker/docker/daemon/logger"
 	"github.com/docker/docker/pkg/plugins"
@@ -42,6 +43,23 @@ func TestPluginSocketPath(t *testing.T) {
 	}
 }
 
+func TestPluginMetadata(test *testing.T) {
+	data, err := os.ReadFile("plugin.json")
+	if err != nil {
+		test.Fatal(err)
+	}
+	var config types.PluginConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		test.Fatal(err)
+	}
+	if config.Description == "" {
+		test.Fatal("plugin description is missing")
+	}
+	if config.Documentation != "https://github.com/kritikos-io/container-log-sanitizer/blob/main/README.md" {
+		test.Fatalf("unexpected plugin documentation link: %q", config.Documentation)
+	}
+}
+
 func TestPluginInstallerKeepsPortableConfig(test *testing.T) {
 	installer, err := os.ReadFile("build-plugin.sh")
 	if err != nil {
@@ -49,6 +67,8 @@ func TestPluginInstallerKeepsPortableConfig(test *testing.T) {
 	}
 	remaining := string(installer)
 	for _, command := range []string{
+		`install -D -m 0644 README.md "$staging/rootfs/usr/share/doc/container-log-sanitizer/README.md"`,
+		`install -D -m 0644 LICENSE "$staging/rootfs/usr/share/doc/container-log-sanitizer/LICENSE"`,
 		`cp plugin.json "$staging/config.json"`,
 		`docker plugin create "$plugin_name" "$staging"`,
 		`docker plugin set "$plugin_name" "logdata.source=$data_root"`,
@@ -91,6 +111,14 @@ func TestPublisherPackagesWithoutHostInstallation(test *testing.T) {
 	if err != nil {
 		test.Fatal(err)
 	}
+	files := map[string][]byte{"publish-plugin.sh": publisher, "plugin.json": manifest}
+	for _, name := range []string{"README.md", "LICENSE"} {
+		contents, err := os.ReadFile(name)
+		if err != nil {
+			test.Fatal(err)
+		}
+		files[name] = contents
+	}
 	for _, testCase := range []struct {
 		name       string
 		testStatus string
@@ -103,32 +131,30 @@ func TestPublisherPackagesWithoutHostInstallation(test *testing.T) {
 	} {
 		test.Run(testCase.name, func(test *testing.T) {
 			root := test.TempDir()
-			for name, contents := range map[string][]byte{"publish-plugin.sh": publisher, "plugin.json": manifest} {
+			for name, contents := range files {
 				if err := os.WriteFile(filepath.Join(root, name), contents, 0600); err != nil {
 					test.Fatal(err)
 				}
 			}
 			command := exec.Command("bash", "-c", `
 git() {
-  case "$*" in
-    'rev-parse --is-shallow-repository') printf 'false\n' ;;
-    'status --porcelain'|'fetch --tags origin') ;;
-    'rev-parse HEAD') printf '0123456789abcdef\n' ;;
-    *) return 90 ;;
-  esac
+	printf '%s\n' "$*" >> git-calls
+	return 90
+}
+dotnet-gitversion() {
+	[[ "$*" == '. -config GitVersion.yml -nofetch -nocache -showvariable SemVer' ]] || return 97
+	printf '1.2.3\n'
 }
 docker() {
   printf '%s\n' "$*" >> docker-calls
   case "$1 $2" in
-    'version --format') printf 'Docker server test\n' ;;
-    'info --format') printf 'linux\n' ;;
-    'plugin ls'|'login containers.kritikos.io') ;;
-    'run --rm') printf '1.2.3\n' ;;
-    'plugin inspect') return 1 ;;
+		'login containers.kritikos.io') ;;
     'plugin create')
       cmp plugin.json "$4/config.json" || return 91
       cmp dist/container-log-sanitizer "$4/rootfs/container-log-sanitizer" || return 92
       test -x "$4/rootfs/container-log-sanitizer" || return 93
+			cmp README.md "$4/rootfs/usr/share/doc/container-log-sanitizer/README.md" || return 98
+			cmp LICENSE "$4/rootfs/usr/share/doc/container-log-sanitizer/LICENSE" || return 99
       ;;
     'plugin push') return "$PUBLISH_PUSH_STATUS" ;;
     *) printf 'Unexpected Docker operation: %s\n' "$*" >&2; return 94 ;;
@@ -142,7 +168,7 @@ go() {
   esac
 }
 sudo() { printf 'Publisher must not elevate privileges\n' >&2; return 96; }
-export -f git docker go sudo
+export -f git dotnet-gitversion docker go sudo
 bash publish-plugin.sh
 `)
 			command.Dir = root
@@ -151,9 +177,15 @@ bash publish-plugin.sh
 			if command.ProcessState == nil || command.ProcessState.ExitCode() != testCase.wantStatus {
 				test.Fatalf("publisher exit did not match %d: %v\n%s", testCase.wantStatus, err, output)
 			}
+			if _, err := os.Stat(filepath.Join(root, "git-calls")); !os.IsNotExist(err) {
+				test.Fatalf("publisher must not run Git commands: %v", err)
+			}
 			calls, err := os.ReadFile(filepath.Join(root, "docker-calls"))
-			if err != nil {
+			if err != nil && !os.IsNotExist(err) {
 				test.Fatal(err)
+			}
+			if testCase.testStatus != "0" && len(calls) != 0 {
+				test.Fatalf("failed tests must prevent registry and plugin operations: %s", calls)
 			}
 			pushed := strings.Contains(string(calls), "plugin push containers.kritikos.io/system/container-log-sanitizer:1.2.3")
 			if pushed != (testCase.testStatus == "0") {

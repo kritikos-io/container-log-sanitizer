@@ -1,5 +1,6 @@
 {
-  "description": "Selectable local/json-file storage with pre-persistence NUL-placeholder filtering and optional redaction",
+  "description": "Docker logging driver with NUL-placeholder filtering, optional regex redaction, and rotating local/json-file storage",
+  "documentation": "https://github.com/kritikos-io/container-log-sanitizer/blob/main/README.md",
   "entrypoint": ["/container-log-sanitizer"],
   "interface": {
     "types": ["docker.logdriver/1.0"],

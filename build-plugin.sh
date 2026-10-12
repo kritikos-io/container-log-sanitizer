@@ -41,6 +41,8 @@ else
   build_container=$(docker create --network none --log-driver none "$build_image")
   docker export "$build_container" | tar -xf - -C "$staging/rootfs"
 fi
+install -D -m 0644 README.md "$staging/rootfs/usr/share/doc/container-log-sanitizer/README.md"
+install -D -m 0644 LICENSE "$staging/rootfs/usr/share/doc/container-log-sanitizer/LICENSE"
 cp plugin.json "$staging/config.json"
 docker plugin create "$plugin_name" "$staging"
 docker plugin set "$plugin_name" "logdata.source=$data_root"
