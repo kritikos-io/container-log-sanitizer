@@ -12,7 +12,7 @@ fail() {
 [[ $# == 0 ]] || fail 'Usage: bash publish-plugin.sh'
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
-for dependency in dotnet-gitversion docker go; do
+for dependency in dotnet-gitversion docker go jq regctl; do
   command -v "$dependency" >/dev/null || fail "Required command not found: $dependency"
 done
 
@@ -26,6 +26,7 @@ stage='running the tests'
 go test -race ./... -count=1 -timeout=120s
 
 stage='building the Linux binary'
+created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 CGO_ENABLED=0 GOOS=linux go build -trimpath -o dist/container-log-sanitizer .
 
 stage='packaging the disabled plugin'
@@ -44,4 +45,26 @@ docker plugin create "$plugin" "$staging"
 
 stage='pushing the plugin'
 docker plugin push "$plugin"
+
+stage='adding Zot manifest annotations'
+regctl manifest get "$plugin" --format raw-body > "$staging/manifest.json"
+jq -e --slurpfile config "$staging/config.json" --arg version "$version" --arg created "$created" '
+  if .mediaType != "application/vnd.docker.distribution.manifest.v2+json" or
+     .config.mediaType != "application/vnd.docker.plugin.v1+json" then
+    error("Expected a Docker managed-plugin manifest")
+  else
+    .annotations = ((.annotations // {}) + {
+      "org.opencontainers.image.title": "Container Log Sanitizer",
+      "org.opencontainers.image.description": $config[0].description,
+      "org.opencontainers.image.documentation": $config[0].documentation,
+      "org.opencontainers.image.source": "https://github.com/kritikos-io/container-log-sanitizer",
+      "org.opencontainers.image.licenses": "Apache-2.0",
+      "org.opencontainers.image.version": $version,
+      "org.opencontainers.image.created": $created
+    })
+  end
+' "$staging/manifest.json" > "$staging/manifest-annotated.json"
+regctl manifest put "$plugin" \
+  --content-type application/vnd.docker.distribution.manifest.v2+json \
+  < "$staging/manifest-annotated.json"
 printf 'Published %s; the local plugin remains disabled.\n' "$plugin"

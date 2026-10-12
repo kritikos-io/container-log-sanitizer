@@ -111,7 +111,26 @@ func TestPublisherPackagesWithoutHostInstallation(test *testing.T) {
 	if err != nil {
 		test.Fatal(err)
 	}
+	var pluginMetadata types.PluginConfig
+	if err := json.Unmarshal(manifest, &pluginMetadata); err != nil {
+		test.Fatal(err)
+	}
 	files := map[string][]byte{"publish-plugin.sh": publisher, "plugin.json": manifest}
+	files["registry-manifest.json"] = []byte(`{
+	"schemaVersion": 2,
+	"mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+	"config": {
+		"mediaType": "application/vnd.docker.plugin.v1+json",
+		"size": 2,
+		"digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+	},
+	"layers": [{
+		"mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+		"size": 0,
+		"digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	}],
+	"annotations": {"example.org/preserved": "yes"}
+}`)
 	for _, name := range []string{"README.md", "LICENSE"} {
 		contents, err := os.ReadFile(name)
 		if err != nil {
@@ -120,14 +139,16 @@ func TestPublisherPackagesWithoutHostInstallation(test *testing.T) {
 		files[name] = contents
 	}
 	for _, testCase := range []struct {
-		name       string
-		testStatus string
-		pushStatus string
-		wantStatus int
+		name             string
+		testStatus       string
+		pushStatus       string
+		annotationStatus string
+		wantStatus       int
 	}{
-		{name: "success", testStatus: "0", pushStatus: "0"},
-		{name: "tests fail", testStatus: "23", pushStatus: "0", wantStatus: 23},
-		{name: "push fails", testStatus: "0", pushStatus: "24", wantStatus: 24},
+		{name: "success", testStatus: "0", pushStatus: "0", annotationStatus: "0"},
+		{name: "tests fail", testStatus: "23", pushStatus: "0", annotationStatus: "0", wantStatus: 23},
+		{name: "push fails", testStatus: "0", pushStatus: "24", annotationStatus: "0", wantStatus: 24},
+		{name: "annotations fail", testStatus: "0", pushStatus: "0", annotationStatus: "25", wantStatus: 25},
 	} {
 		test.Run(testCase.name, func(test *testing.T) {
 			root := test.TempDir()
@@ -167,12 +188,26 @@ go() {
     *) return 95 ;;
   esac
 }
+regctl() {
+	printf '%s\n' "$*" >> registry-calls
+	case "$*" in
+		'manifest get containers.kritikos.io/system/container-log-sanitizer:1.2.3 --format raw-body')
+			cat registry-manifest.json
+			;;
+		'manifest put containers.kritikos.io/system/container-log-sanitizer:1.2.3 --content-type application/vnd.docker.distribution.manifest.v2+json')
+			cat > registry-manifest-annotated.json
+			return "$PUBLISH_ANNOTATION_STATUS"
+			;;
+		*) printf 'Unexpected registry operation: %s\n' "$*" >&2; return 100 ;;
+	esac
+}
 sudo() { printf 'Publisher must not elevate privileges\n' >&2; return 96; }
-export -f git dotnet-gitversion docker go sudo
+export -f git dotnet-gitversion docker go regctl sudo
 bash publish-plugin.sh
 `)
 			command.Dir = root
-			command.Env = append(os.Environ(), "PUBLISH_TEST_STATUS="+testCase.testStatus, "PUBLISH_PUSH_STATUS="+testCase.pushStatus)
+			command.Env = append(os.Environ(), "PUBLISH_TEST_STATUS="+testCase.testStatus,
+				"PUBLISH_PUSH_STATUS="+testCase.pushStatus, "PUBLISH_ANNOTATION_STATUS="+testCase.annotationStatus)
 			output, err := command.CombinedOutput()
 			if command.ProcessState == nil || command.ProcessState.ExitCode() != testCase.wantStatus {
 				test.Fatalf("publisher exit did not match %d: %v\n%s", testCase.wantStatus, err, output)
@@ -190,6 +225,55 @@ bash publish-plugin.sh
 			pushed := strings.Contains(string(calls), "plugin push containers.kritikos.io/system/container-log-sanitizer:1.2.3")
 			if pushed != (testCase.testStatus == "0") {
 				test.Fatalf("push must only follow successful tests: %s", calls)
+			}
+			registryCalls, err := os.ReadFile(filepath.Join(root, "registry-calls"))
+			if err != nil && !os.IsNotExist(err) {
+				test.Fatal(err)
+			}
+			shouldAnnotate := testCase.testStatus == "0" && testCase.pushStatus == "0"
+			if (len(registryCalls) != 0) != shouldAnnotate {
+				test.Fatalf("annotations must only follow a successful plugin push: %s", registryCalls)
+			}
+			if shouldAnnotate {
+				data, err := os.ReadFile(filepath.Join(root, "registry-manifest-annotated.json"))
+				if err != nil {
+					test.Fatal(err)
+				}
+				var before, after map[string]any
+				if err := json.Unmarshal(files["registry-manifest.json"], &before); err != nil {
+					test.Fatal(err)
+				}
+				if err := json.Unmarshal(data, &after); err != nil {
+					test.Fatal(err)
+				}
+				annotations, ok := after["annotations"].(map[string]any)
+				if !ok {
+					test.Fatal("registry manifest annotations are missing")
+				}
+				for key, want := range map[string]string{
+					"example.org/preserved":                  "yes",
+					"org.opencontainers.image.title":         "Container Log Sanitizer",
+					"org.opencontainers.image.description":   pluginMetadata.Description,
+					"org.opencontainers.image.documentation": pluginMetadata.Documentation,
+					"org.opencontainers.image.source":        "https://github.com/kritikos-io/container-log-sanitizer",
+					"org.opencontainers.image.licenses":      "Apache-2.0",
+					"org.opencontainers.image.version":       "1.2.3",
+				} {
+					if annotations[key] != want {
+						test.Errorf("annotation %s = %v, want %q", key, annotations[key], want)
+					}
+				}
+				created, _ := annotations["org.opencontainers.image.created"].(string)
+				if _, err := time.Parse(time.RFC3339, created); err != nil {
+					test.Fatalf("invalid build timestamp %q: %v", created, err)
+				}
+				delete(before, "annotations")
+				delete(after, "annotations")
+				beforeJSON, _ := json.Marshal(before)
+				afterJSON, _ := json.Marshal(after)
+				if !bytes.Equal(beforeJSON, afterJSON) {
+					test.Fatal("annotation step changed plugin manifest content or references")
+				}
 			}
 			staging, err := filepath.Glob(filepath.Join(root, ".plugin-build.*"))
 			if err != nil || len(staging) != 0 {

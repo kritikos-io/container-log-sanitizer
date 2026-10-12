@@ -24,7 +24,9 @@ docker plugin inspect "containers.kritikos.io/system/container-log-sanitizer:$ve
   --format '{{.Config.Description}}{{println}}{{.Config.Documentation}}'
 ```
 
-This is Docker managed-plugin metadata, not ordinary container-image labels. Bundling the files does not automatically publish a Docker Hub-style README page in Zot. The native plugin configuration does not expose OCI image-label fields; the documentation URL is the supported link to the full project documentation. Existing published versions retain their original metadata until a new artifact is built and published.
+The publisher also adds registry-manifest annotations that Zot reads: title, description, documentation/source URLs, SPDX license, version, and the UTC build timestamp. This happens after `docker plugin push`, using `regctl` and `jq`. It preserves the Docker schema-2 manifest type, plugin configuration descriptor, layer descriptors, and existing annotations. Adding annotations changes the registry manifest digest; the initial Docker push digest is not the final annotated digest.
+
+Zot does not extract OS/architecture from Docker plugin configurations, so those fields can remain empty. Bundling the README does not create a Docker Hub-style README page; Zot receives a documentation link. The plugin remains an installable Docker managed plugin, not a regular container image or an OCI index. Existing published versions are not changed by editing the repository; new annotations are applied when the publisher runs.
 
 ## Select A Backend
 
@@ -48,7 +50,7 @@ go test -race ./...
 CGO_ENABLED=0 GOOS=linux go build -trimpath -o dist/container-log-sanitizer .
 ```
 
-Race tests need a C compiler. On hosts where `/tmp` is mounted `noexec`, point `GOTMPDIR` at an executable directory owned by your user. Dependencies are pinned in `go.mod` and `go.sum`; the codec and both Moby stores use Docker 28.5.1 to avoid duplicate protobuf registration across module versions. These internal Moby APIs require compatibility testing when updating dependencies. Both backends must pass the canary on the target Docker daemon before rollout.
+Race tests need a C compiler, and publisher tests need `jq`. The Docker build stage installs `jq` for those tests. On hosts where `/tmp` is mounted `noexec`, point `GOTMPDIR` at an executable directory owned by your user. Dependencies are pinned in `go.mod` and `go.sum`; the codec and both Moby stores use Docker 28.5.1 to avoid duplicate protobuf registration across module versions. These internal Moby APIs require compatibility testing when updating dependencies. Both backends must pass the canary on the target Docker daemon before rollout.
 
 The integration workflow runs race tests, `go vet`, separate syntax checks for both shell scripts, and a static Linux build before installing an isolated plugin on the GitHub Actions runner. It then runs the `local` and `json-file` Docker canaries and removes the plugin. These CI checks do not validate production-host reboot recovery or the installed Alloy runtime.
 
@@ -90,13 +92,20 @@ Publishing is manual, to `containers.kritikos.io/system/container-log-sanitizer`
 
 `GitVersion.yml` uses `TrunkBased/preview1`, optional `v`/`V` tag prefixes, and stable patch-incrementing release branches. Its path filter includes root Go files, `redactor/`, dependency manifests, the Dockerfile and Docker build ignore rules, the plugin manifest, the installer and publisher, and GitVersion configuration. Documentation-only and Alloy-example-only changes are excluded from version-source selection. Existing Git history and version tags determine the starting version; no release tag is created automatically. `SemVer` is used for the plugin tag because `FullSemVer` may contain `+` build metadata, which is invalid in Docker tags.
 
-Run the script in your normal WSL or Linux Bash terminal with Go 1.24 or newer, a C compiler, your global GitVersion .NET tool available as `dotnet-gitversion`, and access to a Linux Docker daemon with managed-plugin support. Root in WSL and `sudo` are not required for publishing; Docker manages the plugin's storage through its API. Installation targets must match the built binary's architecture. The script rebuilds the ignored binary from your current files, including uncommitted edits, instead of trusting an earlier `dist/` artifact. GitVersion runs locally with `-nofetch -nocache`; no GitVersion container or checkout bind mount is used.
+Run the script in your normal WSL or Linux Bash terminal with Go 1.24 or newer, a C compiler, your global GitVersion .NET tool available as `dotnet-gitversion`, `jq`, `regctl`, and access to a Linux Docker daemon with managed-plugin support. Root in WSL and `sudo` are not required for publishing; Docker manages the plugin's storage through its API. Installation targets must match the built binary's architecture. The script rebuilds the ignored binary from your current files, including uncommitted edits, instead of trusting an earlier `dist/` artifact. GitVersion runs locally with `-nofetch -nocache`; no GitVersion container or checkout bind mount is used.
+
+Install `regctl` with Go if it is not already available, and put its executable directory on PATH. It uses Docker login credentials by default; run it as the same user as Docker:
+
+```sh
+go install github.com/regclient/regclient/cmd/regctl@v0.11.6
+export PATH="$(go env GOPATH)/bin:$PATH"
+```
 
 ```sh
 bash publish-plugin.sh
 ```
 
-The script calculates the version from local Git history, runs the Go race tests, builds and packages the binary, prompts for registry login, creates a disabled managed plugin, and pushes it. It does not require a clean working tree, fetch tags, select branches, create commits, enable the plugin, create host log directories, or run host canaries. Temporary packaging files are removed on success or failure. Failures print the failing stage and exit status. Run it with `bash`, not `source`, so its strict shell options cannot alter your interactive terminal. Registry prompts retain terminal input and do not require credentials in a file or command argument.
+The script calculates the version from local Git history, runs the Go race tests, builds and packages the binary, prompts for registry login, creates a disabled managed plugin, pushes it, and adds the Zot-visible annotations. It does not require a clean working tree, fetch tags, select branches, create commits, enable the plugin, create host log directories, or run host canaries. Temporary packaging files are removed on success or failure. Failures print the failing stage and exit status. Run it with `bash`, not `source`, so its strict shell options cannot alter your interactive terminal. Registry prompts retain terminal input and do not require credentials in a file or command argument.
 
 If you pasted an earlier procedure containing `set -euo pipefail` directly into an interactive WSL terminal, a failing command could terminate that shell. Reopen WSL and clear those options before running the script:
 
@@ -106,7 +115,15 @@ set +o pipefail
 bash publish-plugin.sh
 ```
 
-Review Docker's push output for the published digest. No `latest` tag is published, and existing local plugins are not automatically removed or replaced. If only the push fails, retry `docker plugin push` with the full reference printed by the script instead of rebuilding or replacing that plugin. Publishing leaves the local plugin disabled; no application containers are changed. Registry compatibility and authentication are only verified by an actual push. The integration workflow still runs live Docker canaries, and both backends must also pass the canaries on the deployment host before a service uses the plugin.
+Use the registry's final manifest digest after annotation, not the digest printed by the initial Docker push. No `latest` tag is published, and existing local plugins are not automatically removed or replaced. Publishing leaves the local plugin disabled; no application containers are changed. Registry compatibility and authentication are only verified by an actual push. The integration workflow still runs live Docker canaries, and both backends must also pass the canaries on the deployment host before a service uses the plugin.
+
+The metadata step needs read and write access to the registry, including permission to update the just-pushed tag. An immutable-tag policy would prevent this second manifest write. If the metadata step fails after the Docker push, the unannotated plugin has already been uploaded; the script exits with an error instead of claiming that the annotated publication succeeded. A later `docker plugin push` of the same local plugin replaces the registry manifest with its unannotated form, so metadata must be applied again. Read the final registry manifest to verify annotations:
+
+```sh
+read -r -p 'Published version: ' version
+regctl manifest get "containers.kritikos.io/system/container-log-sanitizer:$version" --format raw-body \
+  | jq '.annotations'
+```
 
 ### Install A Published Version
 
