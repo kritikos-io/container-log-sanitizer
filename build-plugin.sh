@@ -7,7 +7,6 @@ plugin_name=${1:-container-log-sanitizer:dev}
 data_root=${2:?Usage: bash build-plugin.sh PLUGIN_NAME /absolute/dedicated/log-directory}
 [[ "$data_root" == /* && "$data_root" != / ]] || { printf 'Use an absolute dedicated data directory.\n' >&2; exit 1; }
 command -v docker >/dev/null
-command -v jq >/dev/null
 docker version --format 'Docker server {{.Server.Version}}'
 if docker plugin inspect "$plugin_name" >/dev/null 2>&1; then
   printf 'Plugin %s already exists. Use a new versioned name; do not replace an active plugin.\n' "$plugin_name" >&2
@@ -42,8 +41,9 @@ else
   build_container=$(docker create --network none --log-driver none "$build_image")
   docker export "$build_container" | tar -xf - -C "$staging/rootfs"
 fi
-jq --arg root "$data_root" '.mounts[0].source = $root' plugin.json > "$staging/config.json"
+cp plugin.json "$staging/config.json"
 docker plugin create "$plugin_name" "$staging"
+docker plugin set "$plugin_name" "logdata.source=$data_root"
 docker plugin enable --timeout 0 "$plugin_name"
 printf 'Installed %s. No containers have been changed.\n' "$plugin_name"
 printf 'Run: bash canary.sh %q EXISTING_SHELL_IMAGE local\n' "$plugin_name"

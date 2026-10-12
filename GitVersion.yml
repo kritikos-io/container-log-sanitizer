@@ -1,0 +1,20 @@
+workflow: TrunkBased/preview1
+tag-prefix: '[vV]?'
+ignore:
+  paths:
+  - '^(?![^/]+\.go$|redactor/|go\.(mod|sum)$|Dockerfile$|\.dockerignore$|plugin\.json$|build-plugin\.sh$|GitVersion\.yml$).*'
+branches:
+  release:
+    mode: ContinuousDeployment
+    label: ''
+    increment: Patch
+    regex: ^releases?[\/-](?<BranchName>.+)
+    source-branches:
+    - main
+    is-release-branch: true
+    is-main-branch: true
+    pre-release-weight: 55000
+
+prevent-increment:
+  of-merged-branch: true
+  when-current-commit-tagged: true

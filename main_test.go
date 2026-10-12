@@ -41,6 +41,26 @@ func TestPluginSocketPath(t *testing.T) {
 	}
 }
 
+func TestPluginInstallerKeepsPortableConfig(test *testing.T) {
+	installer, err := os.ReadFile("build-plugin.sh")
+	if err != nil {
+		test.Fatal(err)
+	}
+	remaining := string(installer)
+	for _, command := range []string{
+		`cp plugin.json "$staging/config.json"`,
+		`docker plugin create "$plugin_name" "$staging"`,
+		`docker plugin set "$plugin_name" "logdata.source=$data_root"`,
+		`docker plugin enable --timeout 0 "$plugin_name"`,
+	} {
+		position := strings.Index(remaining, command)
+		if position == -1 {
+			test.Fatalf("installer must run %q in order", command)
+		}
+		remaining = remaining[position+len(command):]
+	}
+}
+
 func rpc(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	data, err := json.Marshal(body)

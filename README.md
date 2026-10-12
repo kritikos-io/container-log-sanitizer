@@ -40,7 +40,7 @@ The integration workflow runs race tests, `go vet`, separate syntax checks for b
 
 ## Install A Canary Plugin
 
-Run from this directory in a root terminal on the target Linux Docker host. This creates a managed plugin and a dedicated root-owned log directory, not a daemon-wide logging change. The plugin needs no network access, Docker socket mount, or extra capabilities. The installer requires Docker and `jq` and refuses unmarked nonempty data directories.
+Run from this directory in a root terminal on the target Linux Docker host. This creates a managed plugin and a dedicated root-owned log directory, not a daemon-wide logging change. The plugin needs no network access, Docker socket mount, or extra capabilities. The installer requires Docker and refuses unmarked nonempty data directories.
 
 ```sh
 run_id=$(date +%s) &&
@@ -49,6 +49,8 @@ bash build-plugin.sh "$plugin" "/var/lib/container-log-sanitizer-canary-$run_id"
 ```
 
 The installer uses `dist/container-log-sanitizer` if present; otherwise it builds and tests with the pinned Go Docker image. Only use a Linux binary matching the host architecture. Existing plugin names are rejected instead of overwritten. Do not point the data directory at existing application data.
+
+The packaged manifest keeps its portable `/var/lib/container-log-sanitizer` mount default. The installer sets the chosen host directory through `docker plugin set ... logdata.source=...` before enabling the plugin. This runtime setting is not embedded in the artifact pushed to a registry.
 
 The installer enables the plugin with `docker plugin enable --timeout 0`. Docker's default is a 30-second total HTTP client timeout, which also applies while reading the `ReadLogs` response body and disconnects long-running `docker logs -f` streams. Zero removes that total deadline; flushing or sending heartbeats cannot extend a total client timeout. This is an enable-time setting, not a logging option or a socket timeout in the plugin. Removing the client deadline also affects other plugin RPCs, so operational commands against an unresponsive plugin may need an external timeout.
 
@@ -67,6 +69,60 @@ Each canary requires `cmp`, `jq`, and `timeout`. It emits 1,000 NUL placeholders
 Each backend also gets a separate interactive test container to hold a live log stream open for 35 seconds. The canary verifies that it receives the initial marker and that Docker does not terminate the stream at its former 30-second deadline. The external timeout intentionally ends the reader; cleanup removes only the disposable canary containers. Allow about 70 seconds for the two-backend follow checks.
 
 Unit/integration tests use real FIFOs, HTTP RPCs, and the real Moby store. The disk-size test proves that 1,000 rejected records add zero bytes to the store. Host installation, reboot behavior, and a real Beyla-instrumented pilot require separate validation on the target Docker daemon.
+
+## Version And Publish
+
+Publishing is manual, to `containers.kritikos.io/system/container-log-sanitizer`. The artifact is a Docker managed logging plugin, so use `docker plugin push`, not `docker push`. The registry must support Docker plugin artifacts, and the account used by `docker login` must have push access to this repository. Run login and publishing as the same user; credentials are never stored in this repository.
+
+`GitVersion.yml` uses `TrunkBased/preview1`, optional `v`/`V` tag prefixes, and stable patch-incrementing release branches. Its path filter includes root Go files, `redactor/`, dependency manifests, the Dockerfile and Docker build ignore rules, the plugin manifest, the installer, and GitVersion configuration. Documentation-only and Alloy-example-only changes are excluded from version-source selection. Existing Git history and version tags determine the starting version; no release tag is created automatically. `SemVer` is used for the plugin tag because `FullSemVer` may contain `+` build metadata, which is invalid in Docker tags.
+
+Use a clean, full clone owned by the publishing user, checked out on `main` or the intended release branch. Run this block from the repository in a root Bash terminal on a Linux Docker host with Go 1.24 or newer, a C compiler, Git, and `jq`. The Docker daemon must be local to that host, and installation targets must match the built binary's architecture. This procedure rebuilds the ignored binary instead of trusting an earlier `dist/` artifact. GitVersion runs in a pinned container; the publishing host does not need .NET.
+
+```sh
+set -euo pipefail
+git fetch --tags origin
+test "$(git rev-parse --is-shallow-repository)" = false
+test -z "$(git status --porcelain)"
+docker login containers.kritikos.io
+version=$(docker run --rm --network none --log-driver none \
+  --volume "$PWD:/repo" \
+  gittools/gitversion:6.8.2-alpine.3.23-10.0 \
+  /repo -config /repo/GitVersion.yml -nofetch -nocache -showvariable SemVer)
+test -n "$version"
+plugin="containers.kritikos.io/system/container-log-sanitizer:$version"
+data_root="/var/lib/container-log-sanitizer-publish-$version"
+printf 'Publishing %s from %s\n' "$plugin" "$(git rev-parse HEAD)"
+go test -race ./... -count=1 -timeout=120s
+CGO_ENABLED=0 GOOS=linux go build -trimpath -o dist/container-log-sanitizer .
+bash build-plugin.sh "$plugin" "$data_root"
+docker pull busybox:1.37.0
+bash canary.sh "$plugin" busybox:1.37.0 local
+bash canary.sh "$plugin" busybox:1.37.0 json-file
+docker plugin push "$plugin"
+```
+
+If the clone is shallow, run `git fetch --unshallow origin` before this block. Review Docker's push output for the published digest. Use version tags as immutable releases; no `latest` tag is published. The installer refuses an existing local plugin name. If only the push fails after both canaries passed, retry `docker plugin push "$plugin"` instead of rebuilding or replacing that plugin. Publishing leaves the isolated local plugin and its canary storage available for inspection; no application containers are changed. Registry compatibility and authentication are only verified by an actual push.
+
+### Install A Published Version
+
+On another Linux Docker host, authenticate using an account with pull access and enter the exact version that was published. Use a new dedicated data directory and review the permissions requested by Docker:
+
+```sh
+set -euo pipefail
+docker login containers.kritikos.io
+read -r -p 'Published version: ' version
+test -n "$version"
+plugin="containers.kritikos.io/system/container-log-sanitizer:$version"
+data_root="/var/lib/container-log-sanitizer-$version"
+test ! -e "$data_root"
+install -d -m 0700 "$data_root"
+touch "$data_root/.sanitizer-store"
+docker plugin install --disable "$plugin" "logdata.source=$data_root"
+docker plugin enable --timeout 0 "$plugin"
+docker plugin inspect "$plugin" --format '{{.Name}} enabled={{.Enabled}}'
+```
+
+Install disabled and then enable explicitly with `--timeout 0` to retain long-running follow streams. Set `SANITIZER_PLUGIN` to the full versioned reference for the one-service pilot below. Installing or publishing the plugin does not change any container's logging driver. Do not share a data directory between concurrently enabled plugin versions.
 
 ## One-Service Pilot And Rollback
 
