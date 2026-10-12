@@ -26,7 +26,7 @@ Only the common storage options listed below are supported. Their defaults belon
 
 ## Build And Test
 
-Use Go 1.24 or newer on Linux or in WSL. Shell scripts are checked out with LF line endings.
+Use Go 1.24 or newer on Linux or in WSL. Shell scripts are checked out with LF line endings and are tracked as executable.
 
 ```sh
 go test ./...
@@ -35,6 +35,8 @@ CGO_ENABLED=0 GOOS=linux go build -trimpath -o dist/container-log-sanitizer .
 ```
 
 Race tests need a C compiler. On hosts where `/tmp` is mounted `noexec`, point `GOTMPDIR` at an executable directory owned by your user. Dependencies are pinned in `go.mod` and `go.sum`; the codec and both Moby stores use Docker 28.5.1 to avoid duplicate protobuf registration across module versions. These internal Moby APIs require compatibility testing when updating dependencies. Both backends must pass the canary on the target Docker daemon before rollout.
+
+The integration workflow runs race tests, `go vet`, separate syntax checks for both shell scripts, and a static Linux build before installing an isolated plugin on the GitHub Actions runner. It then runs the `local` and `json-file` Docker canaries and removes the plugin. These CI checks do not validate production-host reboot recovery or the installed Alloy runtime.
 
 ## Install A Canary Plugin
 

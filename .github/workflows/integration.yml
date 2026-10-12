@@ -1,82 +1,41 @@
-name: Integration Test
+name: Driver Tests
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PLUGIN_NAME: container-log-sanitizer-ci:${{ github.run_id }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
-
-      - name: Run unit tests
-        run: go test ./redactor
-
-      - name: Build Go binary
+          go-version: '1.27.2'
+      - name: Unit, FIFO, RPC and race tests
+        run: go test -race ./... -count=1 -timeout=120s
+      - name: Static checks and build
         run: |
-          CGO_ENABLED=0 GOOS=linux go build -a -o container-log-sanitizer main.go
-
-      - name: Prepare plugin rootfs
+          go vet ./...
+          bash -n build-plugin.sh
+          bash -n canary.sh
+          CGO_ENABLED=0 GOOS=linux go build -trimpath -o dist/container-log-sanitizer .
+      - name: Install isolated test plugin
+        run: sudo -n bash build-plugin.sh "$PLUGIN_NAME" "$RUNNER_TEMP/sanitizer-store"
+      - name: Docker canaries for both backends
         run: |
-          mkdir -p plugin-rootfs/rootfs
-          cp container-log-sanitizer plugin-rootfs/rootfs/
-
-      - name: Create plugin config
-        run: |
-          cat > plugin-rootfs/config.json <<EOF
-          {
-            "description": "Container log sanitizer plugin",
-            "interface": {
-              "types": ["docker.logdriver/1.0"],
-              "socket": "container-log-sanitizer.sock"
-            },
-            "entrypoint": ["/container-log-sanitizer"],
-            "network": { "type": "host" },
-            "mounts": [],
-            "env": [
-              {
-                "name": "SANITIZE_PATTERNS",
-                "description": "Regex patterns for log redaction",
-                "settable": ["value"],
-                "value": ""
-              }
-            ]
-          }
-          EOF
-
-      - name: List plugin rootfs contents (debug)
-        run: |
-          ls -l plugin-rootfs
-          ls -l plugin-rootfs/rootfs
-          file plugin-rootfs/rootfs/container-log-sanitizer
-          cat plugin-rootfs/config.json
-
-      - name: Check if binary is statically linked
-        run: |
-          ldd plugin-rootfs/rootfs/container-log-sanitizer || echo "Binary is statically linked (ldd failed as expected)"
-
-      - name: Install Docker plugin (local)
-        run: |
-          docker plugin rm -f container-log-sanitizer || true
-          docker plugin ls
-          docker plugin create container-log-sanitizer plugin-rootfs
-          docker plugin ls
-          docker plugin enable container-log-sanitizer
-
-      - name: Run test container with plugin
-        run: |
-          docker run --rm --log-driver=container-log-sanitizer -e SANITIZE_PATTERNS='[a-zA-Z]+@example.com' busybox sh -c 'echo "user@example.com"'
-
-      - name: Cleanup plugin
+          docker pull busybox:1.37.0
+          sudo -n bash canary.sh "$PLUGIN_NAME" busybox:1.37.0 local
+          sudo -n bash canary.sh "$PLUGIN_NAME" busybox:1.37.0 json-file
+      - name: Remove test plugin
         if: always()
         run: |
-          docker plugin disable container-log-sanitizer || true
-          docker plugin rm container-log-sanitizer || true
+          docker plugin disable "$PLUGIN_NAME" || true
+          docker plugin rm "$PLUGIN_NAME" || true
