@@ -2,7 +2,7 @@ workflow: TrunkBased/preview1
 tag-prefix: '[vV]?'
 ignore:
   paths:
-  - '^(?![^/]+\.go$|redactor/|go\.(mod|sum)$|Dockerfile$|\.dockerignore$|plugin\.json$|build-plugin\.sh$|GitVersion\.yml$).*'
+  - '^(?![^/]+\.go$|redactor/|go\.(mod|sum)$|Dockerfile$|\.dockerignore$|plugin\.json$|(?:build|publish)-plugin\.sh$|GitVersion\.yml$).*'
 branches:
   release:
     mode: ContinuousDeployment

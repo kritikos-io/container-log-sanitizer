@@ -82,6 +82,91 @@ test "$status" -eq 1
 	}
 }
 
+func TestPublisherPackagesWithoutHostInstallation(test *testing.T) {
+	publisher, err := os.ReadFile("publish-plugin.sh")
+	if err != nil {
+		test.Fatal(err)
+	}
+	manifest, err := os.ReadFile("plugin.json")
+	if err != nil {
+		test.Fatal(err)
+	}
+	for _, testCase := range []struct {
+		name       string
+		testStatus string
+		pushStatus string
+		wantStatus int
+	}{
+		{name: "success", testStatus: "0", pushStatus: "0"},
+		{name: "tests fail", testStatus: "23", pushStatus: "0", wantStatus: 23},
+		{name: "push fails", testStatus: "0", pushStatus: "24", wantStatus: 24},
+	} {
+		test.Run(testCase.name, func(test *testing.T) {
+			root := test.TempDir()
+			for name, contents := range map[string][]byte{"publish-plugin.sh": publisher, "plugin.json": manifest} {
+				if err := os.WriteFile(filepath.Join(root, name), contents, 0600); err != nil {
+					test.Fatal(err)
+				}
+			}
+			command := exec.Command("bash", "-c", `
+git() {
+  case "$*" in
+    'rev-parse --is-shallow-repository') printf 'false\n' ;;
+    'status --porcelain'|'fetch --tags origin') ;;
+    'rev-parse HEAD') printf '0123456789abcdef\n' ;;
+    *) return 90 ;;
+  esac
+}
+docker() {
+  printf '%s\n' "$*" >> docker-calls
+  case "$1 $2" in
+    'version --format') printf 'Docker server test\n' ;;
+    'info --format') printf 'linux\n' ;;
+    'plugin ls'|'login containers.kritikos.io') ;;
+    'run --rm') printf '1.2.3\n' ;;
+    'plugin inspect') return 1 ;;
+    'plugin create')
+      cmp plugin.json "$4/config.json" || return 91
+      cmp dist/container-log-sanitizer "$4/rootfs/container-log-sanitizer" || return 92
+      test -x "$4/rootfs/container-log-sanitizer" || return 93
+      ;;
+    'plugin push') return "$PUBLISH_PUSH_STATUS" ;;
+    *) printf 'Unexpected Docker operation: %s\n' "$*" >&2; return 94 ;;
+  esac
+}
+go() {
+  case "$1" in
+    test) return "$PUBLISH_TEST_STATUS" ;;
+    build) mkdir -p dist; printf 'test binary\n' > dist/container-log-sanitizer ;;
+    *) return 95 ;;
+  esac
+}
+sudo() { printf 'Publisher must not elevate privileges\n' >&2; return 96; }
+export -f git docker go sudo
+bash publish-plugin.sh
+`)
+			command.Dir = root
+			command.Env = append(os.Environ(), "PUBLISH_TEST_STATUS="+testCase.testStatus, "PUBLISH_PUSH_STATUS="+testCase.pushStatus)
+			output, err := command.CombinedOutput()
+			if command.ProcessState == nil || command.ProcessState.ExitCode() != testCase.wantStatus {
+				test.Fatalf("publisher exit did not match %d: %v\n%s", testCase.wantStatus, err, output)
+			}
+			calls, err := os.ReadFile(filepath.Join(root, "docker-calls"))
+			if err != nil {
+				test.Fatal(err)
+			}
+			pushed := strings.Contains(string(calls), "plugin push containers.kritikos.io/system/container-log-sanitizer:1.2.3")
+			if pushed != (testCase.testStatus == "0") {
+				test.Fatalf("push must only follow successful tests: %s", calls)
+			}
+			staging, err := filepath.Glob(filepath.Join(root, ".plugin-build.*"))
+			if err != nil || len(staging) != 0 {
+				test.Fatalf("temporary packaging files remain: %v (%v)", staging, err)
+			}
+		})
+	}
+}
+
 func rpc(t *testing.T, handler http.Handler, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	data, err := json.Marshal(body)
