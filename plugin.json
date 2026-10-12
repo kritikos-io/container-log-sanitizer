@@ -1,18 +1,21 @@
 {
-  "ManifestVersion": "1.0",
-  "Name": "container-log-sanitizer",
-  "Description": "A Docker logging driver plugin that obfuscates sensitive data using regex before logs leave the container.",
-  "Config": {
-    "Env": [
-      {
-        "Name": "SANITIZE_PATTERNS",
-        "Description": "Regex patterns for redaction, separated by semicolon.",
-        "Settable": ["value"],
-        "Value": ""
-      }
-    ]
+  "description": "Selectable local/json-file storage with pre-persistence NUL-placeholder filtering and optional redaction",
+  "entrypoint": ["/container-log-sanitizer"],
+  "interface": {
+    "types": ["docker.logdriver/1.0"],
+    "socket": "sanitizer.sock"
   },
-  "Interface": {
-    "Types": ["docker.logdriver/1.0"]
-  }
+  "network": {"type": "none"},
+  "linux": {"capabilities": []},
+  "mounts": [
+    {
+      "name": "logdata",
+      "description": "Persistent, private log storage; use a dedicated host directory",
+      "source": "/var/lib/container-log-sanitizer",
+      "destination": "/var/lib/container-log-sanitizer",
+      "type": "bind",
+      "options": ["rbind", "rw"],
+      "settable": ["source"]
+    }
+  ]
 }

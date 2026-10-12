@@ -1,3 +1,5 @@
 # Binaries
 container-log-sanitizer
 *.out
+/dist/
+/.plugin-build.*/
