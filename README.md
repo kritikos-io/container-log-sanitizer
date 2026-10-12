@@ -108,6 +108,22 @@ The Unix-only `/healthz` endpoint reports stored records, dropped placeholders, 
 
 `redactor.New(patterns)` rejects empty or invalid expressions and applies Go regular expressions in order. `RedactLine` handles strings and `RedactBytes` handles byte slices; unmatched content is unchanged. The legacy `NewRedactor()` constructor reads semicolon-separated `SANITIZE_PATTERNS`, trimming whitespace and ignoring empty entries. The managed plugin uses the per-container `sanitize-patterns` logging option instead of that environment variable.
 
+## Explicit Severity In Alloy
+
+`examples/severity.alloy` is an opt-in reusable component, not a live-stack edit. Import it using `import.file`, then put its `explicit_severity` component between your existing trace-context processor and `loki.write`. Validate with your installed Alloy version before deployment.
+
+```alloy
+import.file "sanitizer_profiles" {
+  filename = "/etc/alloy/examples/severity.alloy"
+}
+
+sanitizer_profiles.explicit_severity "logs" {
+  forward_to = [loki.write.default.receiver]
+}
+```
+
+Change the existing processor's `forward_to` to `[sanitizer_profiles.explicit_severity.logs.receiver]`. Keep the existing trace/span extraction and metadata stages. The example stores `level` and `detected_level` as metadata and does not rewrite the original log body. It prefers explicit structured fields, then known Penpot/PostgreSQL prefixes; unsupported or numeric levels are `unknown`, not inferred from stderr or words in a message. Extend profiles for other known formats. Stack continuation lines remain `unknown` until a separately validated multiline policy groups them.
+
 ## Maintenance
 
 Choose a versioned plugin name before sharing builds. Review plugin upgrades, storage compatibility, and failure tests before changing shared logging configuration. Keep the existing Apache-2.0 license and upstream attribution when distributing derived builds.

@@ -1,0 +1,57 @@
+declare "explicit_severity" {
+  argument "forward_to" {}
+
+  loki.process "normalize" {
+    forward_to = argument.forward_to.value
+
+    stage.template {
+      source   = "severity_line"
+      template = "{{ .Entry }}"
+    }
+
+    stage.replace {
+      source     = "severity_line"
+      expression = "(\u001b\\[[0-?]*[ -/]*[@-~])"
+      replace    = ""
+    }
+
+    stage.json {
+      source = "severity_line"
+      expressions = {
+        severity_raw = "severity_text || severityText || level || severity || log.level",
+      }
+    }
+
+    stage.match {
+      selector = "{service_name=~\"penpot-.*\"}"
+      stage.regex {
+        source     = "severity_line"
+        expression = "^\\s*(?P<severity_plain>TRACE|TRC|DEBUG|DBG|INFO|INF|WARN|WRN|WARNING|ERROR|ERR|FATAL)\\s+"
+      }
+    }
+
+    stage.match {
+      selector = "{service_name=\"postgres\"}"
+      stage.regex {
+        source     = "severity_line"
+        expression = "^(?:time=[^\\r\\n]*?\\s+pid=\\d+\\s+)?(?P<severity_plain>DEBUG[1-5]?|INFO|NOTICE|LOG|WARNING|ERROR|FATAL|PANIC):"
+      }
+    }
+
+    stage.template {
+      source   = "severity"
+      template = "{{ $value := \"\" }}{{ if .severity_raw }}{{ $value = ToLower (TrimSpace (printf \"%v\" .severity_raw)) }}{{ else if .severity_plain }}{{ $value = ToLower (printf \"%v\" .severity_plain) }}{{ end }}{{ if or (eq $value \"trace\") (eq $value \"trc\") }}trace{{ else if or (eq $value \"debug\") (eq $value \"dbg\") (eq $value \"debug1\") (eq $value \"debug2\") (eq $value \"debug3\") (eq $value \"debug4\") (eq $value \"debug5\") }}debug{{ else if or (eq $value \"info\") (eq $value \"inf\") (eq $value \"notice\") (eq $value \"log\") }}info{{ else if or (eq $value \"warn\") (eq $value \"wrn\") (eq $value \"warning\") }}warn{{ else if or (eq $value \"error\") (eq $value \"err\") }}error{{ else if or (eq $value \"fatal\") (eq $value \"panic\") (eq $value \"critical\") }}fatal{{ else }}unknown{{ end }}"
+    }
+
+    stage.structured_metadata {
+      values = {
+        level          = "severity",
+        detected_level = "severity",
+      }
+    }
+  }
+
+  export "receiver" {
+    value = loki.process.normalize.receiver
+  }
+}
