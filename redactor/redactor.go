@@ -1,6 +1,7 @@
 package redactor
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -17,19 +18,33 @@ func NewRedactor() (*Redactor, error) {
 		for _, pat := range strings.Split(env, ";") {
 			pat = strings.TrimSpace(pat)
 			if pat != "" {
-				// Unescape double backslashes for env var input
-				pat = strings.ReplaceAll(pat, "\\", "\\")
 				regexes = append(regexes, pat)
 			}
 		}
 	}
-	var compiled []*regexp.Regexp
-	for _, r := range regexes {
-		if re, err := regexp.Compile(r); err == nil {
-			compiled = append(compiled, re)
+	return New(regexes)
+}
+
+func New(patterns []string) (*Redactor, error) {
+	compiled := make([]*regexp.Regexp, 0, len(patterns))
+	for index, pattern := range patterns {
+		if pattern == "" {
+			return nil, fmt.Errorf("redaction pattern %d is empty", index)
 		}
+		expression, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("invalid redaction pattern %d: %w", index, err)
+		}
+		compiled = append(compiled, expression)
 	}
 	return &Redactor{patterns: compiled}, nil
+}
+
+func (redactor *Redactor) RedactBytes(line []byte) []byte {
+	for _, expression := range redactor.patterns {
+		line = expression.ReplaceAll(line, []byte("***"))
+	}
+	return line
 }
 
 // RedactLine applies all patterns to a line
