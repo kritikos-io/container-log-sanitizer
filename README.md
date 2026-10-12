@@ -2,6 +2,8 @@
 
 A Docker logging-driver prototype based on [bgalek/container-log-sanitizer](https://github.com/bgalek/container-log-sanitizer), retaining the Apache-2.0 license. It filters NUL placeholders and optionally redacts complete records before storing them through Moby's `local` or `json-file` backend. This is not an upstream release or a compliance boundary.
 
+The Go module is `github.com/kritikos-io/container-log-sanitizer`; packages from this fork use that import prefix. The binary name and Docker registry repository are unchanged.
+
 ## Data Path
 
 ```text

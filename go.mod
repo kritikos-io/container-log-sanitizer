@@ -1,4 +1,4 @@
-module github.com/bgalek/container-log-sanitizer
+module github.com/kritikos-io/container-log-sanitizer
 
 go 1.24.0
 
